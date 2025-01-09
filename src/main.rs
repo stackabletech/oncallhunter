@@ -1,11 +1,11 @@
 mod config;
 mod http_error;
-mod opsgenie;
+mod jira;
 mod twilio;
 mod util;
 
 use crate::config::{enable_log_exporter, enable_trace_exporter, Config, ConfigError};
-use crate::opsgenie::{get_oncall_number, UserPhoneNumber};
+use crate::jira::{get_oncall_number, UserPhoneNumber};
 use crate::twilio::{alert, AlertResult};
 use crate::StartupError::{InitializeTelemetry, ParseConfig};
 use axum::body::Bytes;
@@ -16,7 +16,7 @@ use axum::{extract::State, Json, Router};
 use futures::{future, pin_mut, FutureExt};
 use reqwest::{ClientBuilder, Url};
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{ResultExt, Snafu};
 use stackable_operator::kube::config::InferConfigError;
 use stackable_operator::logging::TracingTarget;
 use stackable_telemetry::{AxumTraceLayer, Tracing};
@@ -67,7 +67,7 @@ enum StartupError {
 #[snafu(module)]
 enum RequestError {
     #[snafu(display("error when obtaining information from OpsGenie: : \n{source}"))]
-    OpsGenie { source: opsgenie::Error },
+    OpsGenie { source: jira::Error },
     #[snafu(display("error when communicating with Twilio: : \n{source}"))]
     Twilio { source: twilio::Error },
 }
@@ -179,7 +179,7 @@ async fn run() -> Result<(), StartupError> {
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Hash, Clone)]
 #[serde(rename_all = "camelCase", untagged)]
-enum Schedule {
+enum ScheduleIdentifier {
     ScheduleById(ScheduleRequestById),
     ScheduleByName(ScheduleRequestByName),
 }
@@ -228,7 +228,7 @@ pub enum Health {
 #[instrument(name = "who_is_on_call")]
 async fn get_person_on_call(
     State(state): State<AppState>,
-    Query(requested_schedule): Query<Schedule>,
+    Query(requested_schedule): Query<ScheduleIdentifier>,
     headers: HeaderMap,
 ) -> Result<Json<AlertInfo>, http_error::JsonResponse<RequestError>> {
     let AppState { http, config } = state;
@@ -246,7 +246,7 @@ async fn get_person_on_call(
 #[instrument(name = "alert")]
 async fn alert_on_call(
     State(state): State<AppState>,
-    Query(requested_alert): Query<Schedule>,
+    Query(requested_alert): Query<ScheduleIdentifier>,
 ) -> Result<Json<AlertResult>, http_error::JsonResponse<RequestError>> {
     let AppState { http, config } = state;
     tracing::info!(?requested_alert, "Got alert request!");

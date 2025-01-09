@@ -1,7 +1,7 @@
 use crate::config::ConfigError::{ParseBindAddress, ParseBool, ParsePort};
-use crate::{opsgenie, twilio};
+use crate::{jira, twilio};
 use hyper::header::{HeaderValue, InvalidHeaderValue};
-use secrecy::{CloneableSecret, DebugSecret, Secret, Zeroize};
+use secrecy::{CloneableSecret, DebugSecret, Secret, SecretString, Zeroize};
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::env;
 use std::env::VarError;
@@ -31,9 +31,11 @@ static TWILIO_BASEURL_DEFAULT: &str = "https://studio.twilio.com/v2/Flows/";
 static TWILIO_WORKFLOW_ENVNAME: &str = "WYGC_TWILIO_WORKFLOW";
 static TWILIO_OUTGOING_NUMBER_ENVNAME: &str = "WYGC_TWILIO_OUTNUMBER";
 
-static OPSGENIE_TOKEN_ENVNAME: &str = "WYGC_OPSGENIE_TOKEN";
-static OPSGENIE_BASEURL_ENVNAME: &str = "WYGC_OPSGENIE_BASEURL";
-static OPSGENIE_BASEURL_DEFAULT: &str = "https://api.opsgenie.com/v2/";
+static JIRA_USER_ENVNAME: &str = "WYGC_JIRA_USER";
+static JIRA_PASSWORD_ENVNAME: &str = "WYGC_JIRA_PASSWORD";
+static JIRA_BASEURL_ENVNAME: &str = "WYGC_JIRA_BASEURL";
+static JIRA_BASEURL_DEFAULT: &str =
+    "https://api.atlassian.com/jsm/ops/api/efb357c6-07f6-478f-99b7-fd594c010350/v1/";
 
 static SLACK_TOKEN_ENVNAME: &str = "WYGC_SLACK_TOKEN";
 static SLACK_BASEURL_ENVNAME: &str = "WYGC_SLACK_BASEURL";
@@ -104,7 +106,7 @@ pub struct Config {
     pub bind_address: IpAddr,
     pub bind_port: u16,
 
-    pub opsgenie_config: OpsgenieConfig,
+    pub opsgenie_config: JiraConfig,
     pub twilio_config: TwilioConfig,
 
     pub slack_config: Option<SlackConfig>,
@@ -117,9 +119,10 @@ pub struct SlackConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct OpsgenieConfig {
+pub struct JiraConfig {
     pub base_url: Url,
-    pub credentials: SecretAuthHeader,
+    pub username: String,
+    pub password: SecretString,
 }
 
 #[derive(Debug, Clone)]
@@ -162,7 +165,7 @@ impl Config {
         tracing::debug!(bind_port, "Bind port set");
 
         let twilio_config = TwilioConfig::new()?;
-        let opsgenie_config = OpsgenieConfig::new()?;
+        let opsgenie_config = JiraConfig::new()?;
 
         // Attempt to parse SlackConfig, if no webhook is configured log a warning and continue,
         // if we encounter an actual error, abort startup
@@ -179,16 +182,16 @@ impl Config {
     }
 }
 
-impl OpsgenieConfig {
+impl JiraConfig {
     pub fn new() -> Result<Self, ConfigError> {
         // Parse OpsGenie specific configuration values from environment
         // TODO: the default should be in this module I guess..
         let base_url = Url::parse(
-            env::var_os(OPSGENIE_BASEURL_ENVNAME)
-                .unwrap_or(OsString::from(OPSGENIE_BASEURL_DEFAULT))
+            env::var_os(JIRA_BASEURL_ENVNAME)
+                .unwrap_or(OsString::from(JIRA_BASEURL_DEFAULT))
                 .to_str()
                 .context(ConvertOsStringSnafu {
-                    envname: OPSGENIE_BASEURL_ENVNAME,
+                    envname: JIRA_BASEURL_ENVNAME,
                 })?,
         )
         .context(ConstructBaseUrlSnafu {
@@ -197,11 +200,32 @@ impl OpsgenieConfig {
 
         tracing::debug!("OpsGenie base url parsed as : [{}]", base_url.to_string());
 
-        let credentials = get_secret_header_from_env(OPSGENIE_TOKEN_ENVNAME)?;
+        let username = env::var_os(JIRA_USER_ENVNAME)
+            .context(MissingRequiredValueSnafu {
+                envname: JIRA_USER_ENVNAME,
+            })?
+            .to_str()
+            .context(ConvertOsStringSnafu {
+                envname: JIRA_USER_ENVNAME,
+            })?
+            .to_string();
 
-        Ok(OpsgenieConfig {
+        let password = SecretString::new(
+            env::var_os(JIRA_PASSWORD_ENVNAME)
+                .context(MissingRequiredValueSnafu {
+                    envname: JIRA_PASSWORD_ENVNAME,
+                })?
+                .to_str()
+                .context(ConvertOsStringSnafu {
+                    envname: JIRA_PASSWORD_ENVNAME,
+                })?
+                .to_string(),
+        );
+
+        Ok(JiraConfig {
             base_url,
-            credentials,
+            username,
+            password,
         })
     }
 }
