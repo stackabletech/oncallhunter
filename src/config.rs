@@ -1,7 +1,7 @@
 use crate::config::ConfigError::{ParseBindAddress, ParseBool, ParsePort};
 use crate::{jira, twilio};
 use hyper::header::{HeaderValue, InvalidHeaderValue};
-use secrecy::{CloneableSecret, DebugSecret, Secret, SecretString, Zeroize};
+use secrecy::{CloneableSecret, DebugSecret, ExposeSecret, Secret, SecretString, Zeroize};
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::env;
 use std::env::VarError;
@@ -10,8 +10,11 @@ use std::fmt::Debug;
 use std::net::{AddrParseError, IpAddr, Ipv4Addr};
 use std::num::ParseIntError;
 use std::str::{FromStr, ParseBoolError};
+use reqwest::Client;
+use serde::Deserialize;
 use tracing::instrument;
 use url::Url;
+use crate::util::send_json_request;
 
 static TRACE_EXPORTER_ENVNAME: &str = "WYGC_ENABLE_TRACE_EXPORT";
 static TRACE_EXPORTER_DEFAULT: bool = false;
@@ -33,9 +36,12 @@ static TWILIO_OUTGOING_NUMBER_ENVNAME: &str = "WYGC_TWILIO_OUTNUMBER";
 
 static JIRA_USER_ENVNAME: &str = "WYGC_JIRA_USER";
 static JIRA_PASSWORD_ENVNAME: &str = "WYGC_JIRA_PASSWORD";
-static JIRA_BASEURL_ENVNAME: &str = "WYGC_JIRA_BASEURL";
+static JIRA_TENANT_ENVNAME: &str = "WYGC_JIRA_TENANT";
 static JIRA_BASEURL_DEFAULT: &str =
     "https://api.atlassian.com/jsm/ops/api/efb357c6-07f6-478f-99b7-fd594c010350/v1/";
+
+static JIRA_TENANT_RESOLVE_URL: &str = "https://{{jira_tenant}}.atlassian.net/_edge/tenant_info";
+static JIRA_APIURL: &str = "https://api.atlassian.com/jsm/ops/api/";
 
 static SLACK_TOKEN_ENVNAME: &str = "WYGC_SLACK_TOKEN";
 static SLACK_BASEURL_ENVNAME: &str = "WYGC_SLACK_BASEURL";
@@ -99,6 +105,8 @@ pub enum ConfigError {
     },
     #[snafu(display("failed to parse boolean value for [{envname}]: \n{source}"))]
     ConvertEnvString { source: VarError, envname: String },
+    #[snafu(display("resolving jira cloudid from tenant failed: \n{source}"))]
+    ResolveCloudId { source: crate::util::Error },
 }
 
 #[derive(Debug, Clone)]
@@ -135,7 +143,7 @@ pub struct TwilioConfig {
 
 impl Config {
     #[instrument(name = "parse_config")]
-    pub fn new() -> Result<Self, ConfigError> {
+    pub fn new(http: &Client) -> Result<Self, ConfigError> {
         // Determine address and port to listen on from env vars, use default values if not set
         // TODO: Pretty sure this is a garbage way of doing this, need to look at it some more
         //  `into_string()` probably is the way to go here ..
@@ -182,8 +190,15 @@ impl Config {
     }
 }
 
+
+#[derive(Clone, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct CloudIdResult {
+    cloud_id: String
+}
+
 impl JiraConfig {
-    pub fn new() -> Result<Self, ConfigError> {
+    pub async fn new(http: &Client) -> Result<Self, ConfigError> {
         // Parse OpsGenie specific configuration values from environment
         // TODO: the default should be in this module I guess..
         let base_url = Url::parse(
@@ -221,6 +236,29 @@ impl JiraConfig {
                 })?
                 .to_string(),
         );
+
+        let jira_tenant = env::var_os(JIRA_TENANT_ENVNAME)
+            .context(MissingRequiredValueSnafu {
+                envname: JIRA_TENANT_ENVNAME,
+            })?
+            .to_str()
+            .context(ConvertOsStringSnafu {
+                envname: JIRA_TENANT_ENVNAME,
+            })?
+            .to_string();
+
+        let tenant_resolve_url = format!("https://{jira_tenant}.atlassian.net/_edge/tenant_info");
+
+        let mut url_builder = Url::parse(&tenant_resolve_url).context(ConstructBaseUrlSnafu {
+            service: "CloudIDResolveUrl",
+        })?;
+
+        let schedules = send_json_request::<CloudIdResult>(
+            http.get(url_builder.clone())
+                .basic_auth(&username, Some(&password.expose_secret())),
+        )
+            .await
+            .context(ResolveCloudIdSnafu)?;
 
         Ok(JiraConfig {
             base_url,

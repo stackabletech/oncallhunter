@@ -78,7 +78,7 @@ struct OnCallResultData {
     on_call_recipients: Vec<String>,
 }
 
-pub(crate) async fn get_schedule_id_by_name(
+async fn get_schedule_id_by_name(
     schedule_name: &String,
     http: &Client,
     jira_config: &JiraConfig,
@@ -109,6 +109,18 @@ pub(crate) async fn get_schedule_id_by_name(
     })?;
 
     Ok(schedule.id.clone())
+}
+
+async fn get_cloudid_from_tenant(tenant: &str, http: &Client, jirconfig: &JiraConfig) -> Result<String, Error> {
+    let mut url_builder = jira_config.base_url.clone();
+    url_builder = url_builder.join(&format!("schedules")).unwrap();
+
+    let schedules = send_json_request::<Vec<Schedule>>(
+        http.get(url_builder.clone())
+            .query(&[("query", schedule_name)]),
+    )
+        .await
+        .context(RequestScheduleSnafu)?;
 }
 
 pub(crate) async fn get_oncall_number(
